@@ -91,14 +91,13 @@
   </header>
   <div class="invoc">॥ भद्रं कर्णेभिः शृणुयाम ॥<small>may we hear what is auspicious</small></div>
   <hr class="rule"/>
-  <p class="lead">Speak — transcript appears live. Tap ⏸ to close a line with a daṇḍा and start fresh, ◼ to finish. Tap anywhere to edit.</p>
+  <p class="lead">Tap to record; tap again to pause and end the line with a daṇḍा; tap to continue. Tap anywhere to edit.</p>
   <div id="transcript" class="transcript" contenteditable="true" spellcheck="false"><span class="placeholder">Tap the mic below and begin.</span></div>
   <div id="status" class="status"></div>
 </div>
 
 <div class="controls">
   <button class="link" id="copyBtn" onclick="doCopy()" disabled>Copy</button>
-  <button class="pausebtn" id="pauseBtn" onclick="pauseTap()" title="Pause + daṇḍa" style="display:none"><svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="5" width="3.5" height="14" rx="1.5"/><rect x="13.5" y="5" width="3.5" height="14" rx="1.5"/></svg></button>
   <button class="mic" id="mic" onclick="micTap()" title="Record"></button>
   <button class="link" id="shareBtn" onclick="doShare()" disabled>Share</button>
 </div>
@@ -171,33 +170,25 @@ function newId(){ return Date.now().toString(36)+Math.random().toString(36).slic
 function setStatus(t){ document.getElementById('status').textContent=t; }
 const IC={
   mic:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 11v.3a6.5 6.5 0 0 0 13 0V11"/><line x1="12" y1="17.8" x2="12" y2="21"/><line x1="8.5" y1="21" x2="15.5" y2="21"/></svg>',
-  stop:'<svg viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2.5" fill="currentColor"/></svg>',
-  play:'<svg viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></svg>'
+  pause:'<svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="5" width="3.5" height="14" rx="1.5"/><rect x="13.5" y="5" width="3.5" height="14" rx="1.5"/></svg>'
 };
 function setMic(){ const m=document.getElementById('mic');
-  m.innerHTML = state==='recording'?IC.stop:(state==='paused'?IC.play:IC.mic);
+  m.innerHTML = state==='recording'?IC.pause:IC.mic;
   m.classList.toggle('rec', state==='recording');
-  m.title = state==='recording'?'Finish':(state==='paused'?'Resume':'Record');
-  document.getElementById('pauseBtn').style.display = state==='recording'?'flex':'none';
+  m.title = state==='recording'?'Pause + daṇḍa':'Record';
 }
 function enableActions(){ document.getElementById('copyBtn').disabled=false; document.getElementById('shareBtn').disabled=false; }
 
 /* ---- controls ---- */
 async function micTap(){
-  if(state==='recording'){ return stopSession(); }
-  await startSegment(state==='idle');            // fresh session only from idle
+  if(state==='recording'){ return pauseSeg(); }
+  await startSegment(sessionId==='');            // fresh session when transcript is empty
 }
-async function pauseTap(){
-  if(state!=='recording') return;
-  state='paused'; setMic(); setStatus('Finalizing line…');
-  await endSegment(true);                         // finalize + daṇḍa
-  setStatus('Paused — tap ▶ to continue, or Copy.');
-}
-async function stopSession(){
-  state='idle'; setMic(); setStatus('Finalizing…');
-  await endSegment(false);
+async function pauseSeg(){
+  state='paused'; setMic(); setStatus('…');
+  await endSegment(true);                          // finalize line + daṇḍa + fresh encoder context
   logFinal();
-  setStatus('Done. Tap 🎤 to start again.');
+  setStatus('Paused — tap to continue, or Copy.');
 }
 
 /* ---- recording (one segment) ---- */
@@ -351,6 +342,7 @@ const MOCK={ raw_text:"अवतीर्य यदर्वंशे भगव�
   {text:"जज्ञातिभिः",conf:0.85,flagged:true,suggestions:["ज्ञातिभिः","ज्ञानिभिः","ज्ञातृभिः","यज्ञादिभिः","अज्ञानिभिः"]},
   {text:"सार्धं",conf:0.97,flagged:false,suggestions:[]} ]};
 
+document.getElementById('transcript').addEventListener('input', ()=>{ if(currentText()===''){ sessionId=''; segId=0; RAW=''; } });
 setMic();   // render initial mic icon
 </script>
 </body>
