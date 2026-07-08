@@ -188,26 +188,30 @@ async function pauseSeg(){
   state='paused'; setMic(); setStatus('…');
   await endSegment(true);                          // finalize line + daṇḍa + fresh encoder context
   logFinal();
-  setStatus('Paused — tap to continue, or Copy.');
+  setStatus(dbg+' · tap to continue');
 }
 
 /* ---- recording (one segment) ---- */
+function rms(a){ let s=0; for(let i=0;i<a.length;i++) s+=a[i]*a[i]; return a.length?Math.sqrt(s/a.length):0; }
 async function ensureStream(){
   if(stream && stream.active) return true;          // reuse -> no re-prompt
-  try{ stream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true}}); return true; }
-  catch(e){ setStatus('Microphone permission denied.'); return false; }
+  try{ stream=await navigator.mediaDevices.getUserMedia({audio:true}); return true; }   // simplest constraints (mobile-safe)
+  catch(e){ setStatus('Mic unavailable: '+(e.name||e.message||e)); return false; }
 }
 async function startSegment(fresh){
-  if(!(await ensureStream())){ state='idle'; setMic(); return; }
+  actx=new (window.AudioContext||window.webkitAudioContext)();
+  try{ await actx.resume(); }catch(e){}                       // iOS: AudioContext starts suspended
+  if(!(await ensureStream())){ state='idle'; setMic(); try{actx.close();}catch(e){} return; }
+  try{ await actx.resume(); }catch(e){}
   stream.getAudioTracks().forEach(t=>t.enabled=true);
   if(fresh){ document.getElementById('transcript').innerHTML=''; RAW=''; sessionSamples=[]; sessionId=newId(); segId=0; }
-  actx=new (window.AudioContext||window.webkitAudioContext)(); inRate=actx.sampleRate; buffers=[];
+  inRate=actx.sampleRate; buffers=[];
   srcNode=actx.createMediaStreamSource(stream); proc=actx.createScriptProcessor(4096,1,1);
   const sink=actx.createGain(); sink.gain.value=0;
   proc.onaudioprocess=e=>buffers.push(new Float32Array(e.inputBuffer.getChannelData(0)));
   srcNode.connect(proc); proc.connect(sink); sink.connect(actx.destination);
   ensureLive();
-  state='recording'; setMic(); setStatus('Listening… (live) — ⏸ daṇḍa · ◼ finish');
+  state='recording'; setMic(); setStatus('Listening… tap to pause');
   if(!cfg.demo) interimTimer=setInterval(sendInterim,1200);
 }
 function stopCapture(){ clearInterval(interimTimer); interimTimer=null;
@@ -247,10 +251,14 @@ function renderLive(text){
 }
 
 /* ---- finalize a segment (authoritative full-context decode + suggestions) ---- */
+let dbg='';
 async function finalizeSegment(ds, danda){
   const l=document.getElementById('live');
+  const secs=ds.length/16000, lvl=rms(ds);
+  dbg = secs.toFixed(1)+'s · '+Math.round(inRate)+'Hz · lvl '+lvl.toFixed(3);
+  if(lvl<0.004) dbg='⚠ no audio captured ('+secs.toFixed(1)+'s, lvl '+lvl.toFixed(3)+') — reload & allow mic';
   let data=null;
-  if(ds.length >= 16000*0.25){                    // skip near-empty segments
+  if(ds.length >= 16000*0.25 && lvl >= 0.002){     // skip near-empty / silent segments
     if(cfg.demo){ await new Promise(r=>setTimeout(r,300)); data=MOCK; }
     else{
       try{ const wav=encodeWav(ds,16000); const fd=new FormData();
