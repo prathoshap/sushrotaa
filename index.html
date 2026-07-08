@@ -162,7 +162,7 @@ function saveSettings(){ cfg.api=document.getElementById('apiUrl').value.trim()|
 /* ---- state ---- */
 let state='idle';                 // idle | recording | paused
 let stream, actx, proc, srcNode, buffers=[], inRate=48000;
-let interimTimer=null, busy=false, locked=[], sessionSamples=[], RAW='';
+let interimTimer=null, busy=false, locked=[], sessionSamples=[], RAW='', capturing=false, ctxReady=false;
 let sessionId='', segId=0;
 const VOLATILE=3;                 // trailing words that may still change; earlier ones lock
 function newId(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
@@ -193,34 +193,33 @@ async function pauseSeg(){
 
 /* ---- recording (one segment) ---- */
 function rms(a){ let s=0; for(let i=0;i<a.length;i++) s+=a[i]*a[i]; return a.length?Math.sqrt(s/a.length):0; }
-async function ensureStream(){
-  if(stream && stream.active) return true;          // reuse -> no re-prompt
-  try{ stream=await navigator.mediaDevices.getUserMedia({audio:true}); return true; }   // simplest constraints (mobile-safe)
+// Set up mic + AudioContext ONCE (in the first tap gesture), never recreate — robust on mobile.
+async function ensureAudio(){
+  if(ctxReady && actx && actx.state!=='closed'){ try{ await actx.resume(); }catch(e){} return true; }
+  try{ stream=await navigator.mediaDevices.getUserMedia({audio:true}); }
   catch(e){ setStatus('Mic unavailable: '+(e.name||e.message||e)); return false; }
+  actx=new (window.AudioContext||window.webkitAudioContext)();
+  try{ await actx.resume(); }catch(e){}                       // iOS: starts suspended
+  inRate=actx.sampleRate;
+  srcNode=actx.createMediaStreamSource(stream);
+  proc=actx.createScriptProcessor(4096,1,1);
+  const sink=actx.createGain(); sink.gain.value=0;
+  proc.onaudioprocess=e=>{ if(capturing) buffers.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
+  srcNode.connect(proc); proc.connect(sink); sink.connect(actx.destination);
+  ctxReady=true; return true;
 }
 async function startSegment(fresh){
-  actx=new (window.AudioContext||window.webkitAudioContext)();
-  try{ await actx.resume(); }catch(e){}                       // iOS: AudioContext starts suspended
-  if(!(await ensureStream())){ state='idle'; setMic(); try{actx.close();}catch(e){} return; }
-  try{ await actx.resume(); }catch(e){}
-  stream.getAudioTracks().forEach(t=>t.enabled=true);
+  if(!(await ensureAudio())){ state='idle'; setMic(); return; }
   if(fresh){ document.getElementById('transcript').innerHTML=''; RAW=''; sessionSamples=[]; sessionId=newId(); segId=0; }
-  inRate=actx.sampleRate; buffers=[];
-  srcNode=actx.createMediaStreamSource(stream); proc=actx.createScriptProcessor(4096,1,1);
-  const sink=actx.createGain(); sink.gain.value=0;
-  proc.onaudioprocess=e=>buffers.push(new Float32Array(e.inputBuffer.getChannelData(0)));
-  srcNode.connect(proc); proc.connect(sink); sink.connect(actx.destination);
+  buffers=[]; capturing=true;
   ensureLive();
   state='recording'; setMic(); setStatus('Listening… tap to pause');
   if(!cfg.demo) interimTimer=setInterval(sendInterim,1200);
 }
-function stopCapture(){ clearInterval(interimTimer); interimTimer=null;
-  try{ proc&&proc.disconnect(); srcNode&&srcNode.disconnect(); }catch(e){}
-  if(stream){ try{ stream.getAudioTracks().forEach(t=>t.enabled=false); }catch(e){} } }  // mute, keep permission
+function stopCapture(){ clearInterval(interimTimer); interimTimer=null; capturing=false; }  // stop buffering; keep context+mic alive
 async function endSegment(danda){
   stopCapture();
   const ds=downsample(flatten(buffers), inRate, 16000);
-  try{ actx&&actx.close(); }catch(e){}
   if(ds.length) sessionSamples.push(ds);          // accumulate for the flywheel
   await finalizeSegment(ds, danda);
 }
