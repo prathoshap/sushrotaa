@@ -164,7 +164,9 @@ function saveSettings(){ cfg.api=document.getElementById('apiUrl').value.trim()|
 let state='idle';                 // idle | recording | paused
 let stream, actx, proc, srcNode, buffers=[], inRate=48000;
 let interimTimer=null, busy=false, locked=[], sessionSamples=[], RAW='';
+let sessionId='', segId=0;
 const VOLATILE=3;                 // trailing words that may still change; earlier ones lock
+function newId(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
 
 function setStatus(t){ document.getElementById('status').textContent=t; }
 const IC={
@@ -194,6 +196,7 @@ async function pauseTap(){
 async function stopSession(){
   state='idle'; setMic(); setStatus('Finalizing…');
   await endSegment(false);
+  logFinal();
   setStatus('Done. Tap 🎤 to start again.');
 }
 
@@ -206,7 +209,7 @@ async function ensureStream(){
 async function startSegment(fresh){
   if(!(await ensureStream())){ state='idle'; setMic(); return; }
   stream.getAudioTracks().forEach(t=>t.enabled=true);
-  if(fresh){ document.getElementById('transcript').innerHTML=''; RAW=''; sessionSamples=[]; }
+  if(fresh){ document.getElementById('transcript').innerHTML=''; RAW=''; sessionSamples=[]; sessionId=newId(); segId=0; }
   actx=new (window.AudioContext||window.webkitAudioContext)(); inRate=actx.sampleRate; buffers=[];
   srcNode=actx.createMediaStreamSource(stream); proc=actx.createScriptProcessor(4096,1,1);
   const sink=actx.createGain(); sink.gain.value=0;
@@ -273,6 +276,7 @@ async function finalizeSegment(ds, danda){
     else document.getElementById('transcript').appendChild(document.createTextNode((data.raw_text||'')+' '));  // plain greedy
     if(danda) appendDanda();                                            // ⏸ closes the line with a daṇḍa
   }
+  if(data && data.raw_text && ds.length>=16000*0.25) logSegment(ds, data.raw_text);   // reliable capture
   enableActions();
 }
 function appendWords(words){
@@ -304,17 +308,28 @@ function openPop(e,span,sugg){ e.stopPropagation(); closePop();
 
 /* ---- output + flywheel ---- */
 function currentText(){ return (document.getElementById('transcript').innerText||'').replace(/\s+/g,' ').trim(); }
-async function contribute(){
-  if(cfg.demo || cfg.consent!=='true' || !sessionSamples.length) return;
-  try{ const wav=encodeWav(flatten(sessionSamples),16000); const fd=new FormData();
-    fd.append('audio', new Blob([wav],{type:'audio/wav'}),'session.wav');
-    fd.append('raw_text', RAW); fd.append('corrected_text', currentText()); fd.append('consent','true');
-    await fetch(cfg.api.replace(/\/$/,'')+'/feedback',{method:'POST',body:fd});
+async function logSegment(ds, raw){          // per-utterance (audio, raw) at finalize — reliable
+  if(cfg.demo || cfg.consent!=='true') return;
+  try{ const wav=encodeWav(ds,16000); const fd=new FormData();
+    fd.append('kind','segment'); fd.append('session_id',sessionId); fd.append('seg_id',String(segId++));
+    fd.append('raw_text',raw); fd.append('suggest',cfg.suggest?'on':'off'); fd.append('consent','true');
+    fd.append('audio', new Blob([wav],{type:'audio/wav'}),'seg.wav');
+    await fetch(cfg.api.replace(/\/$/,'')+'/feedback',{method:'POST',body:fd,keepalive:true});
   }catch(e){}
 }
-async function doCopy(){ try{ await navigator.clipboard.writeText(currentText()); setStatus('Copied.'); contribute(); }
+function logFinal(beacon){                   // corrected text on stop / copy / tab-close
+  if(cfg.demo || cfg.consent!=='true' || !sessionId) return;
+  const url=cfg.api.replace(/\/$/,'')+'/feedback';
+  const fd=new FormData();
+  fd.append('kind','final'); fd.append('session_id',sessionId);
+  fd.append('corrected_text',currentText()); fd.append('suggest',cfg.suggest?'on':'off'); fd.append('consent','true');
+  if(beacon && navigator.sendBeacon){ navigator.sendBeacon(url, fd); }
+  else { try{ fetch(url,{method:'POST',body:fd,keepalive:true}); }catch(e){} }
+}
+window.addEventListener('beforeunload', ()=>logFinal(true));
+async function doCopy(){ try{ await navigator.clipboard.writeText(currentText()); setStatus('Copied.'); logFinal(); }
   catch(e){ setStatus('Copy failed — select the text manually.'); } }
-async function doShare(){ const text=currentText(); contribute();
+async function doShare(){ const text=currentText(); logFinal();
   if(navigator.share){ try{ await navigator.share({text}); }catch(e){} }
   else { window.location.href='https://wa.me/?text='+encodeURIComponent(text); } }
 
