@@ -165,6 +165,8 @@ let stream, actx, proc, srcNode, buffers=[], inRate=48000;
 let interimTimer=null, busy=false, locked=[], sessionSamples=[], RAW='', capturing=false, ctxReady=false;
 let sessionId='', segId=0;
 const VOLATILE=3;                 // trailing words that may still change; earlier ones lock
+const SEG_CAP=10;                 // auto-commit a segment at ~10s so we never feed long-form audio
+const SIL=0.005;                  // RMS floor — below this = silence/dead capture, emit nothing
 function newId(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
 
 function setStatus(t){ document.getElementById('status').textContent=t; }
@@ -230,14 +232,30 @@ function ensureLive(){ let l=document.getElementById('live');
   l.textContent=''; locked=[]; }
 async function sendInterim(){
   if(busy || cfg.demo || state!=='recording' || buffers.length===0) return;
+  const segSecs=buffers.reduce((n,b)=>n+b.length,0)/inRate;
+  if(segSecs>=SEG_CAP) return autoFlush();          // bound the segment — never feed long-form audio
+  const ds=downsample(flatten(buffers), inRate, 16000);
+  if(rms(ds)<SIL) return;                            // silence so far — don't render hallucinations
   busy=true;
   try{
-    const wav=encodeWav(downsample(flatten(buffers), inRate, 16000), 16000);
+    const wav=encodeWav(ds, 16000);
     const fd=new FormData(); fd.append('audio', new Blob([wav],{type:'audio/wav'}),'clip.wav'); fd.append('interim','true');
     const r=await fetch(cfg.api.replace(/\/$/,'')+'/transcribe',{method:'POST',body:fd});
     const d=await r.json();
     if(state==='recording') renderLive(d.raw_text);
   }catch(e){}
+  busy=false;
+}
+// Auto-commit at SEG_CAP so segments stay inside the model's trained length (5–15s). The cut
+// lands on already-committed words (stable-prefix), not mid-word. No VAD / speech classification.
+async function autoFlush(){
+  if(busy || state!=='recording') return;
+  busy=true;
+  const ds=downsample(flatten(buffers), inRate, 16000);
+  buffers=[];                                         // fresh, bounded next segment (mic keeps capturing)
+  if(ds.length) sessionSamples.push(ds);
+  try{ await finalizeSegment(ds, true); }catch(e){}    // commit words + daṇḍa
+  if(state==='recording') ensureLive();                // new live span for the continuing take
   busy=false;
 }
 function renderLive(text){
@@ -255,9 +273,10 @@ async function finalizeSegment(ds, danda){
   const l=document.getElementById('live');
   const secs=ds.length/16000, lvl=rms(ds);
   dbg = secs.toFixed(1)+'s · '+Math.round(inRate)+'Hz · lvl '+lvl.toFixed(3);
-  if(lvl<0.004) dbg='⚠ no audio captured ('+secs.toFixed(1)+'s, lvl '+lvl.toFixed(3)+') — reload & allow mic';
+  const quiet=(lvl<SIL);
+  if(quiet) dbg='⚠ didn’t catch that ('+secs.toFixed(1)+'s, lvl '+lvl.toFixed(3)+') — speak up or check mic access';
   let data=null;
-  if(ds.length >= 16000*0.25 && lvl >= 0.002){     // skip near-empty / silent segments
+  if(ds.length >= 16000*0.25 && !quiet){           // skip near-empty / silent segments — no hallucinated text
     if(cfg.demo){ await new Promise(r=>setTimeout(r,300)); data=MOCK; }
     else{
       try{ const wav=encodeWav(ds,16000); const fd=new FormData();
@@ -268,13 +287,16 @@ async function finalizeSegment(ds, danda){
     }
   }
   if(l) l.remove();
-  if(data){
-    RAW += (RAW?' ':'')+(data.raw_text||'');
+  const hasText = data && data.raw_text && data.raw_text.trim();
+  if(hasText){
+    RAW += (RAW?' ':'')+data.raw_text;
     if(cfg.suggest && data.words) appendWords(data.words);              // flagged spans + tap-to-fix chips
-    else document.getElementById('transcript').appendChild(document.createTextNode((data.raw_text||'')+' '));  // plain greedy
+    else document.getElementById('transcript').appendChild(document.createTextNode(data.raw_text+' '));  // plain greedy
     if(danda) appendDanda();                                            // ⏸ closes the line with a daṇḍa
+    logSegment(ds, data.raw_text);                                      // reliable capture
+  } else if(data && data.note){
+    setStatus('· '+data.note);                                         // server suppressed a garbled/looping decode
   }
-  if(data && data.raw_text && ds.length>=16000*0.25) logSegment(ds, data.raw_text);   // reliable capture
   enableActions();
 }
 function appendWords(words){
