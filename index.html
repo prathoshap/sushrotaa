@@ -290,17 +290,20 @@ async function finalizeSegment(ds, danda){
   const hasText = data && data.raw_text && data.raw_text.trim();
   if(hasText){
     RAW += (RAW?' ':'')+data.raw_text;
-    if(cfg.suggest && data.words) appendWords(data.words);              // flagged spans + tap-to-fix chips
-    else document.getElementById('transcript').appendChild(document.createTextNode(data.raw_text+' '));  // plain greedy
+    const sid=segId++;                                                  // one id for this segment (container + audio)
+    const seg=document.createElement('span'); seg.className='seg'; seg.dataset.seg=sid; seg.dataset.raw=data.raw_text;
+    if(cfg.suggest && data.words) appendWords(data.words, seg);         // flagged spans + tap-to-fix chips
+    else seg.appendChild(document.createTextNode(data.raw_text+' '));   // plain greedy
+    document.getElementById('transcript').appendChild(seg);
     if(danda) appendDanda();                                            // ⏸ closes the line with a daṇḍa
-    logSegment(ds, data.raw_text);                                      // reliable capture
+    logSegment(ds, data.raw_text, sid);                                 // reliable capture (audio keyed by sid)
   } else if(data && data.note){
     setStatus('· '+data.note);                                         // server suppressed a garbled/looping decode
   }
   enableActions();
 }
-function appendWords(words){
-  const el=document.getElementById('transcript');
+function appendWords(words, el){
+  el = el || document.getElementById('transcript');
   words.forEach(w=>{ const s=document.createElement('span');
     s.className='w'+(w.flagged?' flag':''); s.textContent=w.text;
     if(w.conf!=null) s.title='confidence '+w.conf;
@@ -328,14 +331,25 @@ function openPop(e,span,sugg){ e.stopPropagation(); closePop();
 
 /* ---- output + flywheel ---- */
 function currentText(){ return (document.getElementById('transcript').innerText||'').replace(/\s+/g,' ').trim(); }
-async function logSegment(ds, raw){          // per-utterance (audio, raw) at finalize — reliable
+async function logSegment(ds, raw, sid){     // per-utterance (audio, raw) at finalize — reliable
   if(cfg.demo || cfg.consent!=='true') return;
   try{ const wav=encodeWav(ds,16000); const fd=new FormData();
-    fd.append('kind','segment'); fd.append('session_id',sessionId); fd.append('seg_id',String(segId++));
+    fd.append('kind','segment'); fd.append('session_id',sessionId); fd.append('seg_id',String(sid));
     fd.append('raw_text',raw); fd.append('suggest',cfg.suggest?'on':'off'); fd.append('consent','true');
     fd.append('audio', new Blob([wav],{type:'audio/wav'}),'seg.wav');
     await fetch(cfg.api.replace(/\/$/,'')+'/feedback',{method:'POST',body:fd,keepalive:true});
   }catch(e){}
+}
+function logCorrections(beacon){             // corrections-only training pairs: per-segment (audio, corrected)
+  if(cfg.demo || cfg.consent!=='true' || !sessionId) return;
+  const segs=[...document.querySelectorAll('#transcript .seg')].map(s=>(
+    {seg:s.dataset.seg, raw:s.dataset.raw||'', text:(s.innerText||'').replace(/\s+/g,' ').trim()}));
+  if(!segs.length) return;
+  const url=cfg.api.replace(/\/$/,'')+'/feedback';
+  const fd=new FormData(); fd.append('kind','corrections'); fd.append('session_id',sessionId);
+  fd.append('consent','true'); fd.append('corrections',JSON.stringify(segs));
+  if(beacon && navigator.sendBeacon){ navigator.sendBeacon(url,fd); }
+  else { try{ fetch(url,{method:'POST',body:fd,keepalive:true}); }catch(e){} }
 }
 function logFinal(beacon){                   // corrected text on stop / copy / tab-close
   if(cfg.demo || cfg.consent!=='true' || !sessionId) return;
@@ -346,10 +360,10 @@ function logFinal(beacon){                   // corrected text on stop / copy / 
   if(beacon && navigator.sendBeacon){ navigator.sendBeacon(url, fd); }
   else { try{ fetch(url,{method:'POST',body:fd,keepalive:true}); }catch(e){} }
 }
-window.addEventListener('beforeunload', ()=>logFinal(true));
-async function doCopy(){ try{ await navigator.clipboard.writeText(currentText()); setStatus('Copied.'); logFinal(); }
+window.addEventListener('beforeunload', ()=>{ logFinal(true); logCorrections(true); });
+async function doCopy(){ try{ await navigator.clipboard.writeText(currentText()); setStatus('Copied.'); logFinal(); logCorrections(); }
   catch(e){ setStatus('Copy failed — select the text manually.'); } }
-async function doShare(){ const text=currentText(); logFinal();
+async function doShare(){ const text=currentText(); logFinal(); logCorrections();
   if(navigator.share){ try{ await navigator.share({text}); }catch(e){} }
   else { window.location.href='https://wa.me/?text='+encodeURIComponent(text); } }
 
